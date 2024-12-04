@@ -1,8 +1,8 @@
-const cors= require("cors")
 import { Request, Response } from "express";
 import express from "express";
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
+const cors= require("cors")
 
 const app = express();
 app.use(express.json());
@@ -15,10 +15,10 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 // In-memory storage for chat messages
-const messages: { user: string; message: string }[] = [];
+const messages: { user: string; message: string; roomId: string }[] = [];
 
-// A map to store connected users with their WebSocket connections
-const users = new Map<string, WebSocket>();
+// A map to store connected users by roomId
+const roomMap = new Map<string, WebSocket[]>();
 
 app.get("/", (req: Request, res: Response) => {
   res.send("Hello World");
@@ -26,7 +26,7 @@ app.get("/", (req: Request, res: Response) => {
 
 // Endpoint to get all messages (for client-side persistence)
 app.get("/api/messages", (req: Request, res: Response) => {
-  res.json(messages); 
+  res.json(messages);
 });
 
 // Endpoint to delete all chat history
@@ -40,52 +40,76 @@ wss.on('connection', (ws: WebSocket) => {
   console.log("Client connected to server");
 
   // Send existing messages to newly connected client
-  ws.send(JSON.stringify({ type: 'init', messages }));
+  ws.send(JSON.stringify({ type: 'initialMessages', messages }));
 
-  // Handle incoming messages from clients
+  // Handle incoming message from client
   ws.on('message', (message: string) => {
-    try {
-      const data = JSON.parse(message); 
+    const parsedMessage = JSON.parse(message);
+    const { user, roomId, text } = parsedMessage;
 
-      // If a new user joins
-      if (data.type === 'join') {
-        const username = data.username;
-        if (username) {
-          users.set(username, ws);
-          console.log(`User joined: ${username}`);
+    // Store the message in the in-memory storage
+    const newMessage = { user, message: text, roomId };
+    messages.push(newMessage);
+
+    // Ensure room exists in the roomMap
+    if (!roomMap.has(roomId)) {
+      roomMap.set(roomId, []);
+    }
+
+    // Add the current WebSocket connection to the room's list of connections
+    const roomClients = roomMap.get(roomId)!;
+    if (!roomClients.includes(ws)) {
+      roomClients.push(ws);
+    }
+
+    // Determine if the room has more than one client
+    if (roomClients.length > 1) {
+      // Broadcast message to all clients in the room (group chat)
+      roomClients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({
+            type: 'newMessage',
+            message: newMessage
+          }));
         }
-      }
-
-      // If a chat message is sent
-      if (data.type === 'message') {
-        const { user, message } = data;
-        // Save the message
-        messages.push({ user, message });
-
-        // Broadcast the message to all connected clients
-        wss.clients.forEach((client) => {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ type: 'message', user, message }));
-          }
-        });
-      }
-    } catch (error) {
-      console.error('Error processing message:', error);
+      });
+    } else {
+      // If only one client in the room (private chat), send the message only to the other user in the room
+      roomClients.forEach(client => {
+        if (client !== ws && client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({
+            type: 'newMessage',
+            message: newMessage
+          }));
+        }
+      });
     }
   });
 
-  // Handle client disconnection
+  // Handle WebSocket disconnection
   ws.on('close', () => {
-    users.forEach((value, key) => {
-      if (value === ws) {
-        users.delete(key);
-        console.log(`User disconnected: ${key}`);
+    console.log("Client disconnected from server");
+
+    // Remove the WebSocket connection from the room map
+    roomMap.forEach((clients, roomId) => {
+      const index = clients.indexOf(ws);
+      if (index !== -1) {
+        clients.splice(index, 1); // Remove client from room
+        // If room is empty, delete it
+        if (clients.length === 0) {
+          roomMap.delete(roomId);
+        }
       }
     });
+  });
+
+  // Handle WebSocket errors
+  ws.on('error', (error) => {
+    console.error("WebSocket error:", error);
   });
 });
 
 // Start the HTTP server
 server.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
+  console.log(`Server is running on http://localhost:${port}`);
 });
